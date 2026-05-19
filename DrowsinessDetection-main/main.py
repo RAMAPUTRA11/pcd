@@ -3,8 +3,9 @@ import time
 import math
 import cv2
 import mediapipe as mp
+import os # Tambahan untuk mengecek path file mp3
 from PyQt5 import QtWidgets, uic, QtCore, QtGui
-from PyQt5.QtMultimedia import QSound  # Library Audio Resmi PyQt5
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent  # Library Audio Resmi untuk MP3
 
 # ==========================================
 # INDEKS LANDMARK WAJAH SECARA MANUAL
@@ -44,6 +45,14 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
             min_detection_confidence=0.6,
             min_tracking_confidence=0.6
         )
+        
+        # Inisialisasi Object Player Audio untuk MP3
+        self.player = QMediaPlayer()
+        # Mengambil lokasi file alarm.mp3 secara absolut biar aman di Windows
+        mp3_path = os.path.join(os.getcwd(), "alarm.mp3")
+        url = QtCore.QUrl.fromLocalFile(mp3_path)
+        self.audio_content = QMediaContent(url)
+        self.player.setMedia(self.audio_content)
         
         # Timer Pembacaan Kamera (Thread GUI)
         self.camera_timer = QtCore.QTimer()
@@ -120,17 +129,18 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
         return mar_score, pts
 
     def trigger_sys_sound(self):
-        # Membunyikan suara Windows default Beep secara asinkronus agar GUI tidak macet
+        # Membunyikan suara secara asinkronus agar GUI tidak macet ketika tombol test diklik
         QtCore.QMetaObject.invokeMethod(self, "play_beep_sound", QtCore.Qt.QueuedConnection)
 
     @QtCore.pyqtSlot()
     def play_beep_sound(self):
-        # Menggunakan sound sistem Windows default (Aman, Tanpa butuh file eksternal)
-        QtWidgets.QApplication.beep()
+        # Memainkan alarm MP3 sekali putar (untuk testing tombol)
+        if self.player.state() != QMediaPlayer.PlayingState:
+            self.player.play()
 
     def action_start(self):
         if not self.is_running:
-            self.capture = cv2.VideoCapture(0)
+            self.capture = cv2.VideoCapture(1)
             if self.capture.isOpened():
                 self.is_running = True
                 self.camera_timer.start(33) # Set interval ~30 FPS
@@ -146,6 +156,7 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
             self.btnStart.setEnabled(True)
             self.btnStop.setEnabled(False)
             self.blink_counter = 0
+            self.player.stop() # Matikan alarm MP3 saat sistem stop
             self.apply_initial_stylesheet()
 
     # ==========================================
@@ -168,7 +179,7 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
         is_yawning = False
 
         if analysis_result.multi_face_landmarks:
-            self.FaceDetected.setText("Yes")  # Diperbaiki ke f kecil
+            self.FaceDetected.setText("Yes")
             raw_landmarks = analysis_result.multi_face_landmarks[0].landmark
             
             # Perhitungan Teknis Geometri Wajah Mandiri
@@ -183,27 +194,22 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
             self.marValue.setText(f"{current_mar:.3f}")
             
             # --- CODING MANUAL DRAWING ---
-            # Menggambar marker detektor Mata (Cyan)
             for point in l_eye_pts + r_eye_pts:
                 cv2.circle(frame, point, 2, (255, 255, 0), -1)
                 
-            # Menggambar marker detektor舊Bibir/Mulut (Hijau)
             for i in range(len(mouth_pts)):
                 cv2.circle(frame, mouth_pts[i], 2, (0, 255, 0), -1)
                 if i > 0:
                     cv2.line(frame, mouth_pts[i-1], mouth_pts[i], (0, 200, 0), 1)
             
-            # Menggambar marker detektor Alis (Kuning)
             for idx in EYEBROWS:
                 pt = (int(raw_landmarks[idx].x * w), int(raw_landmarks[idx].y * h))
                 cv2.circle(frame, pt, 2, (0, 255, 255), -1)
                 
-            # Menggambar koordinat Jembatan Hidung (Merah)
             for idx in NOSE_BRIDGE:
                 pt = (int(raw_landmarks[idx].x * w), int(raw_landmarks[idx].y * h))
                 cv2.circle(frame, pt, 3, (0, 0, 255), -1)
                 
-            # Menggambar konstruksi Garis Rahang/Dagu (Magenta)
             for idx in JAW_LINE:
                 pt = (int(raw_landmarks[idx].x * w), int(raw_landmarks[idx].y * h))
                 cv2.circle(frame, pt, 2, (255, 0, 255), -1)
@@ -220,27 +226,36 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
             if self.blink_counter >= self.CONSEC_FRAMES or is_yawning:
                 is_drowsy = True
                 
-            # Sinkronisasi hitungan frame terpejam ke komponen UI (Ditambahkan agar UI ter-update!)
             self.drowsyCounter.setText(str(self.blink_counter))
             
         else:
-            self.FaceDetected.setText("No")  # Diperbaiki ke f kecil
+            self.FaceDetected.setText("No")
             self.earValue.setText("-")
             self.marValue.setText("-")
             self.blink_counter = 0
             self.drowsyCounter.setText("0")
 
-        # --- UPDATE INTERFACE & ALARM SYSTEM ---
+        # --- UPDATE INTERFACE & LOGIKA AUDIO ALARM MP3 LOOPING ---
         if is_drowsy:
             self.statusBadge.setText("STATUS: DROWSY (BAHAYA)")
             self.statusBadge.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold; border-radius: 8px; padding: 10px;")
-            self.trigger_sys_sound()
+            
+            # Jika MP3 sedang tidak berbunyi, putar alarmnya
+            if self.player.state() != QMediaPlayer.PlayingState:
+                self.player.play()
+                
+            # Logika Looping MP3 Manual: jika durasi lagu habis, dia balik lagi ke awal otomatis
+            if self.player.state() == QMediaPlayer.StoppedState and is_drowsy:
+                self.player.play()
         else:
             if self.is_running and analysis_result.multi_face_landmarks:
                 self.statusBadge.setText("STATUS: NORMAL")
                 self.statusBadge.setStyleSheet("background-color: #10b981; color: white; font-weight: bold; border-radius: 8px; padding: 10px;")
+            
+            # Otomatis matikan alarm MP3 jika kondisi sudah aman/normal kembali
+            self.player.stop()
 
-        # --- PERHITUNGAN REAL-TIME FPS (METRIK PCD) ---
+        # --- PERHITUNGAN REAL-TIME FPS ---
         self.frame_count += 1
         current_time = time.time()
         if current_time - self.last_fps_time >= 1.0:
