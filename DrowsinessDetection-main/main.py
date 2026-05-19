@@ -32,6 +32,11 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
         self.blink_counter = 0
         self.is_running = False
         
+        # --- LOGIKA BARU: TRACKER MENGUAP & TIMER ALARM 8 DETIK ---
+        self.yawn_counter = 0        # Menghitung jumlah total menguap
+        self.yawn_state = False      # Penanda status: Sedang mangap lebar atau tidak
+        self.alarm_active = False    # Penanda status: Apakah alarm 8 detik sedang menyala
+        
         # Pengukur Kinerja (PCD Metric)
         self.fps = 0
         self.frame_count = 0
@@ -48,7 +53,6 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
         
         # Inisialisasi Object Player Audio untuk MP3
         self.player = QMediaPlayer()
-        # Mengambil lokasi file alarm.mp3 secara absolut biar aman di Windows
         mp3_path = os.path.join(os.getcwd(), "alarm.mp3")
         url = QtCore.QUrl.fromLocalFile(mp3_path)
         self.audio_content = QMediaContent(url)
@@ -89,7 +93,6 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
         self.fpsCounter.setText("0")
 
     def sync_parameters(self):
-        # Konversi nilai Slider Integer QT ke nilai Float Matematika Citra
         self.EAR_THRESHOLD = self.earThresholdInput.value() / 100.0
         self.MAR_THRESHOLD = self.marThresholdInput.value() / 100.0
         
@@ -108,7 +111,6 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
         vertical_2 = self.calculate_euclidean_distance(pts[2], pts[4])
         horizontal = self.calculate_euclidean_distance(pts[0], pts[3])
         
-        # Pencegahan pembagian dengan nol (zero division error)
         if horizontal == 0:
             return 0.0, pts
             
@@ -129,12 +131,10 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
         return mar_score, pts
 
     def trigger_sys_sound(self):
-        # Membunyikan suara secara asinkronus agar GUI tidak macet ketika tombol test diklik
         QtCore.QMetaObject.invokeMethod(self, "play_beep_sound", QtCore.Qt.QueuedConnection)
 
     @QtCore.pyqtSlot()
     def play_beep_sound(self):
-        # Memainkan alarm MP3 sekali putar (untuk testing tombol)
         if self.player.state() != QMediaPlayer.PlayingState:
             self.player.play()
 
@@ -143,7 +143,7 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
             self.capture = cv2.VideoCapture(1)
             if self.capture.isOpened():
                 self.is_running = True
-                self.camera_timer.start(33) # Set interval ~30 FPS
+                self.camera_timer.start(33)
                 self.btnStart.setEnabled(False)
                 self.btnStop.setEnabled(True)
 
@@ -156,8 +156,18 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
             self.btnStart.setEnabled(True)
             self.btnStop.setEnabled(False)
             self.blink_counter = 0
-            self.player.stop() # Matikan alarm MP3 saat sistem stop
+            self.yawn_counter = 0
+            self.yawn_state = False
+            self.alarm_active = False
+            self.player.stop()
             self.apply_initial_stylesheet()
+
+    # --- LOGIKA KHUSUS UNTUK MEMATIKAN ALARM SETELAH 8 DETIK ---
+    def stop_8_seconds_alarm(self):
+        self.player.stop()
+        self.alarm_active = False
+        # Reset counter menguap kembali ke 0 agar siklus 3x berikutnya bisa dihitung ulang
+        self.yawn_counter = 0 
 
     # ==========================================
     # CORE PROCESSING LOOP (CITRA DIGITAL PROCESSING)
@@ -167,16 +177,13 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
         if not ret:
             return
 
-        # 1. Operasi Pembalikan Citra (Mirroring)
         frame = cv2.flip(frame, 1)
         h, w, _ = frame.shape
         
-        # 2. Konversi Ruang Warna (BGR ke RGB untuk pemrosesan array koordinat)
         rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         analysis_result = self.face_mesh.process(rgb_image)
         
-        is_drowsy = False
-        is_yawning = False
+        is_eyes_closed = False
 
         if analysis_result.multi_face_landmarks:
             self.FaceDetected.setText("Yes")
@@ -189,7 +196,6 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
             
             current_mar, mouth_pts = self.extract_mouth_aspect_ratio(raw_landmarks, MOUTH_OUTER, w, h)
             
-            # Tampilkan data numerik pcd ke UI Label Qt
             self.earValue.setText(f"{current_ear:.3f}")
             self.marValue.setText(f"{current_mar:.3f}")
             
@@ -214,19 +220,27 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
                 pt = (int(raw_landmarks[idx].x * w), int(raw_landmarks[idx].y * h))
                 cv2.circle(frame, pt, 2, (255, 0, 255), -1)
 
-            # --- KONDISI LOGIKA ALARM SENSOR ---
+            # --- KONDISI LOGIKA MATA TERPEJAM ---
             if current_ear < self.EAR_THRESHOLD:
                 self.blink_counter += 1
             else:
                 self.blink_counter = 0
                 
-            if current_mar > self.MAR_THRESHOLD:
-                is_yawning = True
-
-            if self.blink_counter >= self.CONSEC_FRAMES or is_yawning:
-                is_drowsy = True
+            if self.blink_counter >= self.CONSEC_FRAMES:
+                is_eyes_closed = True
                 
             self.drowsyCounter.setText(str(self.blink_counter))
+            
+            # --- LOGIKA DETEKSI 1 KALI MENGUAP PENUH (TRANSISI STATE) ---
+            if current_mar > self.MAR_THRESHOLD:
+                if not self.yawn_state:
+                    # Mulut baru saja terbuka lebar melewati batas threshold
+                    self.yawn_state = True
+            else:
+                if self.yawn_state:
+                    # Mulut kembali menutup, hitung sebagai 1 kali menguap sukses
+                    self.yawn_counter += 1
+                    self.yawn_state = False
             
         else:
             self.FaceDetected.setText("No")
@@ -235,25 +249,35 @@ class DrowsinessDetectionSystem(QtWidgets.QMainWindow):
             self.blink_counter = 0
             self.drowsyCounter.setText("0")
 
-        # --- UPDATE INTERFACE & LOGIKA AUDIO ALARM MP3 LOOPING ---
-        if is_drowsy:
-            self.statusBadge.setText("STATUS: DROWSY (BAHAYA)")
+        # --- UPDATE INTERFACE & SISTEM ALARM 8 DETIK ---
+        # Trigger Alarm aktif jika: Mata terpejam lama ATAU Sudah menguap lebih dari 3 kali
+        if is_eyes_closed or self.yawn_counter > 3:
+            
+            # Khusus jika trigger-nya adalah menguap > 3x dan alarm belum aktif
+            if self.yawn_counter > 3 and not self.alarm_active:
+                self.alarm_active = True
+                self.player.play()
+                # Daftarkan fungsi pemutus otomatis tepat setelah 8000 milidetik (8 detik)
+                QtCore.QTimer.singleShot(8000, self.stop_8_seconds_alarm)
+
+            # Kondisi standarnya (Mata merem / Selama durasi alarm menguap aktif)
+            self.statusBadge.setText(f"STATUS: DROWSY (YAWN: {self.yawn_counter})")
             self.statusBadge.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold; border-radius: 8px; padding: 10px;")
             
-            # Jika MP3 sedang tidak berbunyi, putar alarmnya
-            if self.player.state() != QMediaPlayer.PlayingState:
+            # Jika pemicunya mata merem, play looping konvensional biasa
+            if is_eyes_closed and self.player.state() != QMediaPlayer.PlayingState:
                 self.player.play()
-                
-            # Logika Looping MP3 Manual: jika durasi lagu habis, dia balik lagi ke awal otomatis
-            if self.player.state() == QMediaPlayer.StoppedState and is_drowsy:
+            
+            # Logika Looping MP3 Manual selama state bahaya masih terpenuhi
+            if self.player.state() == QMediaPlayer.StoppedState and (is_eyes_closed or self.alarm_active):
                 self.player.play()
         else:
-            if self.is_running and analysis_result.multi_face_landmarks:
-                self.statusBadge.setText("STATUS: NORMAL")
-                self.statusBadge.setStyleSheet("background-color: #10b981; color: white; font-weight: bold; border-radius: 8px; padding: 10px;")
-            
-            # Otomatis matikan alarm MP3 jika kondisi sudah aman/normal kembali
-            self.player.stop()
+            # Jika alarm menguap 8 detik TIDAK sedang berjalan, kembalikan ke NORMAL
+            if not self.alarm_active:
+                if self.is_running and analysis_result.multi_face_landmarks:
+                    self.statusBadge.setText(f"STATUS: NORMAL (YAWN: {self.yawn_counter})")
+                    self.statusBadge.setStyleSheet("background-color: #10b981; color: white; font-weight: bold; border-radius: 8px; padding: 10px;")
+                self.player.stop()
 
         # --- PERHITUNGAN REAL-TIME FPS ---
         self.frame_count += 1
